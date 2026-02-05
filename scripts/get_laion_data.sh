@@ -26,4 +26,3 @@ fi
 
 wget $S3_URL -O $FILE_PATH
 tar -xvzf $FILE_PATH -C $DATA_DIR
-echo "downloaded to ${FILE_UNZIP_DIR}"
