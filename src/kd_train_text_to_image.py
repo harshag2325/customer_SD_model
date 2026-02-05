@@ -586,11 +586,7 @@ def main():
         examples["input_ids"] = tokenize_captions(examples)
         return examples
 
-    with accelerator.main_process_first():
-        if args.max_train_samples is not None:
-            dataset = dataset.shuffle(seed=args.seed).select(range(args.max_train_samples))
-        # Set the training transforms
-        train_dataset = dataset.with_transform(preprocess_train)
+    
 
     def collate_fn(examples):
         pixel_values = torch.stack([example["pixel_values"] for example in examples])
