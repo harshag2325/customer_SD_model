@@ -47,6 +47,7 @@ from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import check_min_version, deprecate
 from diffusers.utils.import_utils import is_xformers_available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 import csv
 import time
