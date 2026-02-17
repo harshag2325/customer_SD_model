@@ -623,9 +623,7 @@ def main():
     if args.use_ema:
         ema_unet.to(device)
     
-    text_encoder.to(device, dtype=weight_dtype)
-    vae.to(device, dtype=weight_dtype)
-    unet_teacher.to(device, dtype=weight_dtype)
+    
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
@@ -634,6 +632,11 @@ def main():
         weight_dtype = torch.float16
     elif args.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
+
+
+    text_encoder.to(device, dtype=weight_dtype)
+    vae.to(device, dtype=weight_dtype)
+    unet_teacher.to(device, dtype=weight_dtype)
 
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
