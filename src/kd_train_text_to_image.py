@@ -47,7 +47,7 @@ from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import check_min_version, deprecate
 from diffusers.utils.import_utils import is_xformers_available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 import csv
 import time
 import copy
@@ -375,7 +375,7 @@ def main():
                 " use `--variant=non_ema` instead."
             ),
         )
-    logging_dir = os.path.join(args.output_dir, args.logging_dir)
+    logging_dir = os.path.join(/kaggle/working/customer_SD_model, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(total_limit=args.checkpoints_total_limit)
 
@@ -383,6 +383,7 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
+        logging_dir=logging_dir,
         project_config=accelerator_project_config,
     )
 
@@ -585,7 +586,11 @@ def main():
         examples["input_ids"] = tokenize_captions(examples)
         return examples
 
-   
+    with accelerator.main_process_first():
+        if args.max_train_samples is not None:
+            dataset = dataset.shuffle(seed=args.seed).select(range(args.max_train_samples))
+        # Set the training transforms
+        train_dataset = dataset.with_transform(preprocess_train)
 
     def collate_fn(examples):
         pixel_values = torch.stack([example["pixel_values"] for example in examples])
@@ -595,7 +600,7 @@ def main():
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
-        dataset,
+        train_dataset,
         shuffle=True,
         collate_fn=collate_fn,
         batch_size=args.train_batch_size,
@@ -616,28 +621,26 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    
+    # Prepare everything with our `accelerator`.
+    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader, lr_scheduler
+    )
 
-    unet.to(device)
-    
     if args.use_ema:
-        ema_unet.to(device)
-    
-    
+        ema_unet.to(accelerator.device)
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
-    if args.mixed_precision == "fp16":
+    if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
-    elif args.mixed_precision == "bf16":
+    elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-
-    text_encoder.to(device, dtype=weight_dtype)
-    vae.to(device, dtype=weight_dtype)
-    unet_teacher.to(device, dtype=weight_dtype)
-
+    # Move student's text_encode and vae and teacher's unet to gpu and cast to weight_dtype
+    text_encoder.to(accelerator.device, dtype=weight_dtype)
+    vae.to(accelerator.device, dtype=weight_dtype)
+    unet_teacher.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -648,12 +651,14 @@ def main():
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
+    if accelerator.is_main_process:
+        accelerator.init_trackers("text2image-fine-tune", config=vars(args))
 
     # Train!
-    total_batch_size = args.train_batch_size * args.gradient_accumulation_steps
+    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(dataset)}")
+    logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
