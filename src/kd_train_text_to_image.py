@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import random
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -139,14 +140,15 @@ def parse_args():
     parser.add_argument("--max_grad_norm", default=1.0, type=float)
     parser.add_argument("--logging_dir", type=str, default="logs")
     parser.add_argument("--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"])
-    parser.add_argument("--report_to", type=str, default="tensorboard")  # kept for CLI compatibility, no-op
+    parser.add_argument("--report_to", type=str, default="tensorboard")  # no-op, kept for CLI compatibility
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--checkpointing_steps", type=int, default=500)
     parser.add_argument("--checkpoints_total_limit", type=int, default=None)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true")
     parser.add_argument("--unet_config_path", type=str, default="./src/unet_config")
-    parser.add_argument("--unet_config_name", type=str, default="bk_small", choices=["bk_base", "bk_small", "bk_tiny"])
+    parser.add_argument("--unet_config_name", type=str, default="bk_small",
+                        choices=["bk_base", "bk_small", "bk_tiny"])
     parser.add_argument("--lambda_sd", type=float, default=1.0)
     parser.add_argument("--lambda_kd_output", type=float, default=1.0)
     parser.add_argument("--lambda_kd_feat", type=float, default=1.0)
@@ -171,11 +173,26 @@ def main():
     args = parse_args()
 
     # ------------------------------------------------------------------ device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cuda_available = torch.cuda.is_available()
+    device = torch.device("cuda" if cuda_available else "cpu")
+    logger.info(f"Using device: {device}")
+    if not cuda_available:
+        logger.warning("CUDA is not available. Training on CPU will be very slow. "
+                       "Please enable a GPU accelerator in your environment.")
 
     # --------------------------------------------------------- mixed precision
-    use_fp16 = args.mixed_precision == "fp16"
-    use_bf16 = args.mixed_precision == "bf16"
+    # Only enable fp16 if CUDA is available; fp16 is not supported on CPU
+    use_fp16 = (args.mixed_precision == "fp16") and cuda_available
+    use_bf16 = (args.mixed_precision == "bf16") and cuda_available
+
+    if args.mixed_precision == "fp16" and not cuda_available:
+        logger.warning("fp16 mixed precision requested but CUDA is not available. "
+                       "Falling back to fp32.")
+    if args.mixed_precision == "bf16" and not cuda_available:
+        logger.warning("bf16 mixed precision requested but CUDA is not available. "
+                       "Falling back to fp32.")
+
+    # GradScaler only works with CUDA + fp16
     scaler = torch.cuda.amp.GradScaler() if use_fp16 else None
 
     weight_dtype = torch.float32
@@ -204,7 +221,7 @@ def main():
                                 'loss_total', 'loss_sd', 'loss_kd_output', 'loss_kd_feat',
                                 'lr', 'lamb_sd', 'lamb_kd_output', 'lamb_kd_feat'])
 
-    if args.allow_tf32:
+    if args.allow_tf32 and cuda_available:
         torch.backends.cuda.matmul.allow_tf32 = True
 
     # --------------------------------------------------------------- models
@@ -237,7 +254,8 @@ def main():
     # ------------------------------------------------------------------- EMA
     if args.use_ema:
         ema_unet = UNet2DConditionModel.from_config(config_student)
-        ema_unet = EMAModel(ema_unet.parameters(), model_cls=UNet2DConditionModel, model_config=ema_unet.config)
+        ema_unet = EMAModel(ema_unet.parameters(), model_cls=UNet2DConditionModel,
+                            model_config=ema_unet.config)
         ema_unet.to(device)
 
     # --------------------------------------------------------------- xformers
@@ -262,7 +280,8 @@ def main():
         try:
             import bitsandbytes as bnb
         except ImportError:
-            raise ImportError("Please install bitsandbytes to use 8-bit Adam: pip install bitsandbytes")
+            raise ImportError(
+                "Please install bitsandbytes to use 8-bit Adam: pip install bitsandbytes")
         optimizer_cls = bnb.optim.AdamW8bit
     else:
         optimizer_cls = torch.optim.AdamW
@@ -377,11 +396,12 @@ def main():
 
     # --------------------------------------------------------- logging info
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
-    logger.info(f"  Gradient accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    logger.info(f"  Num examples         = {len(train_dataset)}")
+    logger.info(f"  Num Epochs           = {args.num_train_epochs}")
+    logger.info(f"  Batch size           = {args.train_batch_size}")
+    logger.info(f"  Gradient accum steps = {args.gradient_accumulation_steps}")
+    logger.info(f"  Total optim steps    = {args.max_train_steps}")
+    logger.info(f"  Mixed precision      = {args.mixed_precision} (active fp16={use_fp16}, bf16={use_bf16})")
 
     global_step = 0
     first_epoch = 0
@@ -425,7 +445,9 @@ def main():
             pixel_values = batch["pixel_values"].to(device, dtype=weight_dtype)
             input_ids = batch["input_ids"].to(device)
 
-            with torch.cuda.amp.autocast(enabled=use_fp16):
+            # ---- forward pass with autocast (safe on CPU too) ----
+            with torch.amp.autocast('cuda', enabled=use_fp16 and cuda_available):
+
                 # encode images to latents
                 latents = vae.encode(pixel_values).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
@@ -446,7 +468,8 @@ def main():
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                    raise ValueError(
+                        f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # student forward
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
@@ -454,8 +477,10 @@ def main():
 
                 # teacher forward (no grad)
                 with torch.no_grad():
-                    model_pred_teacher = unet_teacher(noisy_latents, timesteps, encoder_hidden_states).sample
-                loss_kd_output = F.mse_loss(model_pred.float(), model_pred_teacher.float(), reduction="mean")
+                    model_pred_teacher = unet_teacher(
+                        noisy_latents, timesteps, encoder_hidden_states).sample
+                loss_kd_output = F.mse_loss(
+                    model_pred.float(), model_pred_teacher.float(), reduction="mean")
 
                 # feature KD loss
                 losses_kd_feat = []
@@ -468,32 +493,33 @@ def main():
                         F.mse_loss(a_stu.float(), a_tea.detach().float(), reduction="mean"))
                 loss_kd_feat = sum(losses_kd_feat)
 
-                # total loss (scale by grad accum)
+                # total loss (scaled for gradient accumulation)
                 loss = (args.lambda_sd * loss_sd
                         + args.lambda_kd_output * loss_kd_output
                         + args.lambda_kd_feat * loss_kd_feat)
                 loss = loss / args.gradient_accumulation_steps
 
-            # backward
-            if use_fp16:
+            # ---- backward ----
+            if use_fp16 and scaler is not None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
 
-            # accumulate metrics (unscaled values)
+            # accumulate metrics (store unscaled values)
             train_loss += loss.item()
             train_loss_sd += loss_sd.item() / args.gradient_accumulation_steps
             train_loss_kd_output += loss_kd_output.item() / args.gradient_accumulation_steps
             train_loss_kd_feat += loss_kd_feat.item() / args.gradient_accumulation_steps
 
-            # optimizer step after accumulation
+            # ---- optimizer step after accumulation ----
             if (step + 1) % args.gradient_accumulation_steps == 0:
-                if use_fp16:
+
+                if use_fp16 and scaler is not None:
                     scaler.unscale_(optimizer)
 
                 torch.nn.utils.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
 
-                if use_fp16:
+                if use_fp16 and scaler is not None:
                     scaler.step(optimizer)
                     scaler.update()
                 else:
@@ -507,10 +533,9 @@ def main():
 
                 progress_bar.update(1)
                 global_step += 1
-
                 current_lr = lr_scheduler.get_last_lr()[0]
 
-                # log to console
+                # console log
                 logger.info(
                     f"epoch={epoch} step={step} global_step={global_step} "
                     f"loss={train_loss:.4f} loss_sd={train_loss_sd:.4f} "
@@ -518,7 +543,7 @@ def main():
                     f"loss_kd_feat={train_loss_kd_feat:.4f} lr={current_lr:.6f}"
                 )
 
-                # log to CSV
+                # CSV log
                 with open(csv_log_path, 'a') as logfile:
                     logwriter = csv.writer(logfile, delimiter=',')
                     logwriter.writerow([
@@ -528,7 +553,7 @@ def main():
                         args.lambda_sd, args.lambda_kd_output, args.lambda_kd_feat
                     ])
 
-                # log to wandb if available
+                # wandb log
                 if has_wandb:
                     wandb.log({
                         "train_loss": train_loss,
@@ -556,15 +581,15 @@ def main():
                     }, os.path.join(save_path, "checkpoint.pt"))
                     logger.info(f"Saved checkpoint to {save_path}")
 
-                    # respect checkpoints_total_limit
+                    # prune old checkpoints if limit set
                     if args.checkpoints_total_limit is not None:
                         all_ckpts = sorted(
-                            [d for d in os.listdir(args.output_dir) if d.startswith("checkpoint")],
+                            [d for d in os.listdir(args.output_dir)
+                             if d.startswith("checkpoint")],
                             key=lambda x: int(x.split("-")[1])
                         )
                         while len(all_ckpts) > args.checkpoints_total_limit:
                             oldest = os.path.join(args.output_dir, all_ckpts.pop(0))
-                            import shutil
                             shutil.rmtree(oldest)
                             logger.info(f"Deleted old checkpoint: {oldest}")
 
@@ -594,7 +619,7 @@ def main():
                 if args.seed is not None:
                     generator = generator.manual_seed(args.seed)
 
-                # save teacher images once
+                # teacher validation images (saved once)
                 if not os.path.exists(os.path.join(val_img_dir, "teacher_0.png")):
                     for kk in range(args.num_valid_images):
                         image = pipeline(
@@ -602,14 +627,15 @@ def main():
                         ).images[0]
                         image.save(os.path.join(val_img_dir, f"teacher_{kk}.png"))
 
-                # save student images
+                # student validation images
                 pipeline.unet = unet
                 for kk in range(args.num_valid_images):
                     image = pipeline(
                         args.valid_prompt, num_inference_steps=25, generator=generator
                     ).images[0]
                     tmp_name = os.path.join(
-                        val_img_dir, f"gstep{global_step}_epoch{epoch}_step{step}_{kk}.png")
+                        val_img_dir,
+                        f"gstep{global_step}_epoch{epoch}_step{step}_{kk}.png")
                     image.save(tmp_name)
                     logger.info(f"Saved validation image: {tmp_name}")
 
@@ -632,7 +658,7 @@ def main():
         revision=args.revision,
     )
     pipeline.save_pretrained(args.output_dir)
-    logger.info(f"Model saved to {args.output_dir}")
+    logger.info(f"Training complete. Model saved to {args.output_dir}")
 
 
 if __name__ == "__main__":
