@@ -554,7 +554,8 @@ def main():
                     ])
 
                 # wandb log
-                if has_wandb:
+                # wandb log
+                if has_wandb and wandb.run is not None:
                     wandb.log({
                         "train_loss": train_loss,
                         "train_loss_sd": train_loss_sd,
