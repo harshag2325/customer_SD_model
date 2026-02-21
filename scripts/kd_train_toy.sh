@@ -5,7 +5,7 @@
 MODEL_NAME="CompVis/stable-diffusion-v1-4"
 TRAIN_DATA_DIR="./data/laion_aes/preprocessed_11k"
 UNET_CONFIG_PATH="./src/unet_config"
-UNET_NAME="bk_tiny" # option: ["bk_base", "bk_small", "bk_tiny"]
+UNET_NAME="bk_base" # option: ["bk_base", "bk_small", "bk_tiny"]
 OUTPUT_DIR="./results/toy_"$UNET_NAME
 
 BATCH_SIZE=2
