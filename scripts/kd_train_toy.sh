@@ -25,7 +25,7 @@ CUDA_VISIBLE_DEVICES=0 python src/kd_train_text_to_image.py \
   --max_grad_norm 1 \
   --lr_scheduler="constant" --lr_warmup_steps=0 \
   --report_to="all" \
-  --max_train_steps=20 \
+  --max_train_steps=14 \
   --seed 1234 \
   --gradient_accumulation_steps $GRAD_ACCUMULATION \
   --checkpointing_steps 5 \
