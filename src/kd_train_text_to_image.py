@@ -24,7 +24,7 @@ import diffusers
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
-from diffusers.utils import check_min_version, deprecate
+from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
 
 import csv
@@ -46,15 +46,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 def get_activation(mem, name):
     def get_output_hook(module, input, output):
         mem[name] = output
     return get_output_hook
 
+
 def add_hook(net, mem, mapping_layers):
     for n, m in net.named_modules():
         if n in mapping_layers:
             m.register_forward_hook(get_activation(mem, n))
+
 
 def copy_weight_from_teacher(unet_stu, unet_tea, student_type):
     connect_info = {}
@@ -100,9 +103,11 @@ def copy_weight_from_teacher(unet_stu, unet_tea, student_type):
 
     return unet_stu
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
-    parser.add_argument("--pretrained_model_name_or_path", type=str, default=None, required=True)
+    parser.add_argument("--pretrained_model_name_or_path", type=str, default=None, required=True,
+                        help="Path to pretrained model or model identifier from huggingface.co/models.")
     parser.add_argument("--revision", type=str, default=None, required=False)
     parser.add_argument("--dataset_config_name", type=str, default=None)
     parser.add_argument("--train_data_dir", type=str, default=None)
@@ -134,6 +139,7 @@ def parse_args():
     parser.add_argument("--max_grad_norm", default=1.0, type=float)
     parser.add_argument("--logging_dir", type=str, default="logs")
     parser.add_argument("--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"])
+    parser.add_argument("--report_to", type=str, default="tensorboard")  # kept for CLI compatibility, no-op
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--checkpointing_steps", type=int, default=500)
     parser.add_argument("--checkpoints_total_limit", type=int, default=None)
@@ -150,6 +156,7 @@ def parse_args():
     parser.add_argument("--use_copy_weight_from_teacher", action="store_true")
 
     args = parser.parse_args()
+
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
@@ -163,30 +170,32 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Setup device
+    # ------------------------------------------------------------------ device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Setup mixed precision scaler
+    # --------------------------------------------------------- mixed precision
     use_fp16 = args.mixed_precision == "fp16"
+    use_bf16 = args.mixed_precision == "bf16"
     scaler = torch.cuda.amp.GradScaler() if use_fp16 else None
 
     weight_dtype = torch.float32
-    if args.mixed_precision == "fp16":
+    if use_fp16:
         weight_dtype = torch.float16
-    elif args.mixed_precision == "bf16":
+    elif use_bf16:
         weight_dtype = torch.bfloat16
 
+    # -------------------------------------------------------------------- seed
     if args.seed is not None:
         torch.manual_seed(args.seed)
         random.seed(args.seed)
         np.random.seed(args.seed)
 
-    if args.output_dir is not None:
-        os.makedirs(args.output_dir, exist_ok=True)
-
+    # ----------------------------------------------------------- output dirs
+    os.makedirs(args.output_dir, exist_ok=True)
     val_img_dir = os.path.join(args.output_dir, 'val_img')
     os.makedirs(val_img_dir, exist_ok=True)
 
+    # ------------------------------------------------------------ CSV logger
     csv_log_path = os.path.join(args.output_dir, 'log_loss.csv')
     if not os.path.exists(csv_log_path):
         with open(csv_log_path, 'w') as logfile:
@@ -198,46 +207,62 @@ def main():
     if args.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    # Load models
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-    tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision)
-    text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
+    # --------------------------------------------------------------- models
+    noise_scheduler = DDPMScheduler.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="scheduler")
+    tokenizer = CLIPTokenizer.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision)
+    text_encoder = CLIPTextModel.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+    vae = AutoencoderKL.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
 
-    unet_teacher = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision)
-    config_student = UNet2DConditionModel.load_config(args.unet_config_path, subfolder=args.unet_config_name)
-    unet = UNet2DConditionModel.from_config(config_student, revision=args.non_ema_revision)
+    # teacher
+    unet_teacher = UNet2DConditionModel.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision)
+
+    # student
+    config_student = UNet2DConditionModel.load_config(
+        args.unet_config_path, subfolder=args.unet_config_name)
+    unet = UNet2DConditionModel.from_config(config_student)
 
     if args.use_copy_weight_from_teacher:
         copy_weight_from_teacher(unet, unet_teacher, args.unet_config_name)
 
+    # freeze everything except student unet
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     unet_teacher.requires_grad_(False)
 
+    # ------------------------------------------------------------------- EMA
     if args.use_ema:
-        ema_unet = UNet2DConditionModel.from_config(config_student, revision=args.revision)
+        ema_unet = UNet2DConditionModel.from_config(config_student)
         ema_unet = EMAModel(ema_unet.parameters(), model_cls=UNet2DConditionModel, model_config=ema_unet.config)
         ema_unet.to(device)
 
+    # --------------------------------------------------------------- xformers
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
             unet.enable_xformers_memory_efficient_attention()
         else:
-            raise ValueError("xformers is not available.")
+            raise ValueError("xformers is not available. Make sure it is installed correctly.")
 
+    # ------------------------------------------------ gradient checkpointing
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
 
+    # ----------------------------------------------------------- scale lr
     if args.scale_lr:
-        args.learning_rate = args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size
+        args.learning_rate = (
+            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size
+        )
 
-    # Optimizer
+    # --------------------------------------------------------------- optimizer
     if args.use_8bit_adam:
         try:
             import bitsandbytes as bnb
         except ImportError:
-            raise ImportError("Please install bitsandbytes to use 8-bit Adam.")
+            raise ImportError("Please install bitsandbytes to use 8-bit Adam: pip install bitsandbytes")
         optimizer_cls = bnb.optim.AdamW8bit
     else:
         optimizer_cls = torch.optim.AdamW
@@ -250,11 +275,11 @@ def main():
         eps=args.adam_epsilon,
     )
 
-    # Dataset
+    # ---------------------------------------------------------------- dataset
     print("*** load dataset: start")
     t0 = time.time()
     dataset = load_dataset("imagefolder", data_dir=args.train_data_dir, split="train")
-    print(f"*** load dataset: end --- {time.time()-t0} sec")
+    print(f"*** load dataset: end --- {time.time() - t0:.2f} sec")
 
     column_names = dataset.column_names
     image_column = column_names[0]
@@ -268,8 +293,11 @@ def main():
             elif isinstance(caption, (list, np.ndarray)):
                 captions.append(random.choice(caption) if is_train else caption[0])
             else:
-                raise ValueError(f"Caption column `{caption_column}` should contain either strings or lists of strings.")
-        inputs = tokenizer(captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt")
+                raise ValueError(
+                    f"Caption column `{caption_column}` should contain either strings or lists of strings.")
+        inputs = tokenizer(
+            captions, max_length=tokenizer.model_max_length,
+            padding="max_length", truncation=True, return_tensors="pt")
         return inputs.input_ids
 
     train_transforms = transforms.Compose([
@@ -304,7 +332,7 @@ def main():
         num_workers=args.dataloader_num_workers,
     )
 
-    # LR Scheduler
+    # ------------------------------------------------------- lr scheduler
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
@@ -317,59 +345,70 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    # Move models to device
+    # ------------------------------------------- move models to device
     unet.to(device)
     text_encoder.to(device, dtype=weight_dtype)
     vae.to(device, dtype=weight_dtype)
     unet_teacher.to(device, dtype=weight_dtype)
 
-    # Hooks for feature KD
+    # ----------------------------------------------- feature KD hooks
     acts_tea = {}
     acts_stu = {}
+
     if args.unet_config_name in ["bk_base", "bk_small"]:
-        mapping_layers_tea = ['up_blocks.0', 'up_blocks.1', 'up_blocks.2', 'up_blocks.3',
-                              'down_blocks.0', 'down_blocks.1', 'down_blocks.2', 'down_blocks.3']
+        mapping_layers_tea = [
+            'up_blocks.0', 'up_blocks.1', 'up_blocks.2', 'up_blocks.3',
+            'down_blocks.0', 'down_blocks.1', 'down_blocks.2', 'down_blocks.3'
+        ]
         mapping_layers_stu = copy.deepcopy(mapping_layers_tea)
+
     elif args.unet_config_name in ["bk_tiny"]:
-        mapping_layers_tea = ['down_blocks.0', 'down_blocks.1', 'down_blocks.2.attentions.1.proj_out',
-                              'up_blocks.1', 'up_blocks.2', 'up_blocks.3']
-        mapping_layers_stu = ['down_blocks.0', 'down_blocks.1', 'down_blocks.2.attentions.0.proj_out',
-                              'up_blocks.0', 'up_blocks.1', 'up_blocks.2']
+        mapping_layers_tea = [
+            'down_blocks.0', 'down_blocks.1', 'down_blocks.2.attentions.1.proj_out',
+            'up_blocks.1', 'up_blocks.2', 'up_blocks.3'
+        ]
+        mapping_layers_stu = [
+            'down_blocks.0', 'down_blocks.1', 'down_blocks.2.attentions.0.proj_out',
+            'up_blocks.0', 'up_blocks.1', 'up_blocks.2'
+        ]
 
     add_hook(unet_teacher, acts_tea, mapping_layers_tea)
     add_hook(unet, acts_stu, mapping_layers_stu)
 
+    # --------------------------------------------------------- logging info
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Batch size = {args.train_batch_size}")
+    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    logger.info(f"  Gradient accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
 
     global_step = 0
     first_epoch = 0
 
-    # Resume from checkpoint
+    # ------------------------------------------------- resume from checkpoint
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
+            ckpt_dir = args.resume_from_checkpoint
         else:
-            dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = [d for d in os.listdir(args.output_dir) if d.startswith("checkpoint")]
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1] if len(dirs) > 0 else None
+            ckpt_dir = os.path.join(args.output_dir, dirs[-1]) if dirs else None
 
-        if path is None:
-            logger.info(f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting fresh.")
+        if ckpt_dir is None or not os.path.exists(ckpt_dir):
+            logger.info("No checkpoint found. Starting fresh training run.")
             args.resume_from_checkpoint = None
         else:
-            logger.info(f"Resuming from checkpoint {path}")
-            checkpoint = torch.load(os.path.join(args.output_dir, path, "checkpoint.pt"), map_location=device)
-            unet.load_state_dict(checkpoint["unet"])
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-            global_step = checkpoint["global_step"]
+            logger.info(f"Resuming from checkpoint: {ckpt_dir}")
+            ckpt = torch.load(os.path.join(ckpt_dir, "checkpoint.pt"), map_location=device)
+            unet.load_state_dict(ckpt["unet"])
+            optimizer.load_state_dict(ckpt["optimizer"])
+            lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
+            global_step = ckpt["global_step"]
             first_epoch = global_step // num_update_steps_per_epoch
+            logger.info(f"Resumed at global step {global_step}")
 
+    # ------------------------------------------------------------- training
     progress_bar = tqdm(range(global_step, args.max_train_steps))
     progress_bar.set_description("Steps")
 
@@ -382,21 +421,26 @@ def main():
         train_loss_kd_feat = 0.0
 
         for step, batch in enumerate(train_dataloader):
+
             pixel_values = batch["pixel_values"].to(device, dtype=weight_dtype)
             input_ids = batch["input_ids"].to(device)
 
-            # Forward pass (with optional autocast)
             with torch.cuda.amp.autocast(enabled=use_fp16):
+                # encode images to latents
                 latents = vae.encode(pixel_values).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
 
+                # sample noise & timesteps
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
-                timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,), device=device).long()
+                timesteps = torch.randint(
+                    0, noise_scheduler.num_train_timesteps, (bsz,), device=device).long()
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
+                # text embeddings
                 encoder_hidden_states = text_encoder(input_ids)[0]
 
+                # target
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
@@ -404,40 +448,49 @@ def main():
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
+                # student forward
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
                 loss_sd = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
+                # teacher forward (no grad)
                 with torch.no_grad():
                     model_pred_teacher = unet_teacher(noisy_latents, timesteps, encoder_hidden_states).sample
                 loss_kd_output = F.mse_loss(model_pred.float(), model_pred_teacher.float(), reduction="mean")
 
+                # feature KD loss
                 losses_kd_feat = []
-                for (m_tea, m_stu) in zip(mapping_layers_tea, mapping_layers_stu):
+                for m_tea, m_stu in zip(mapping_layers_tea, mapping_layers_stu):
                     a_tea = acts_tea[m_tea]
                     a_stu = acts_stu[m_stu]
-                    if type(a_tea) is tuple: a_tea = a_tea[0]
-                    if type(a_stu) is tuple: a_stu = a_stu[0]
-                    tmp = F.mse_loss(a_stu.float(), a_tea.detach().float(), reduction="mean")
-                    losses_kd_feat.append(tmp)
+                    if isinstance(a_tea, tuple): a_tea = a_tea[0]
+                    if isinstance(a_stu, tuple): a_stu = a_stu[0]
+                    losses_kd_feat.append(
+                        F.mse_loss(a_stu.float(), a_tea.detach().float(), reduction="mean"))
                 loss_kd_feat = sum(losses_kd_feat)
 
-                loss = args.lambda_sd * loss_sd + args.lambda_kd_output * loss_kd_output + args.lambda_kd_feat * loss_kd_feat
+                # total loss (scale by grad accum)
+                loss = (args.lambda_sd * loss_sd
+                        + args.lambda_kd_output * loss_kd_output
+                        + args.lambda_kd_feat * loss_kd_feat)
                 loss = loss / args.gradient_accumulation_steps
 
+            # backward
             if use_fp16:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
 
+            # accumulate metrics (unscaled values)
             train_loss += loss.item()
-            train_loss_sd += (loss_sd.item() / args.gradient_accumulation_steps)
-            train_loss_kd_output += (loss_kd_output.item() / args.gradient_accumulation_steps)
-            train_loss_kd_feat += (loss_kd_feat.item() / args.gradient_accumulation_steps)
+            train_loss_sd += loss_sd.item() / args.gradient_accumulation_steps
+            train_loss_kd_output += loss_kd_output.item() / args.gradient_accumulation_steps
+            train_loss_kd_feat += loss_kd_feat.item() / args.gradient_accumulation_steps
 
-            # Gradient accumulation
+            # optimizer step after accumulation
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if use_fp16:
                     scaler.unscale_(optimizer)
+
                 torch.nn.utils.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
 
                 if use_fp16:
@@ -455,22 +508,43 @@ def main():
                 progress_bar.update(1)
                 global_step += 1
 
-                logger.info(f"step={global_step} loss={train_loss:.4f} loss_sd={train_loss_sd:.4f} "
-                            f"loss_kd_output={train_loss_kd_output:.4f} loss_kd_feat={train_loss_kd_feat:.4f}")
+                current_lr = lr_scheduler.get_last_lr()[0]
 
+                # log to console
+                logger.info(
+                    f"epoch={epoch} step={step} global_step={global_step} "
+                    f"loss={train_loss:.4f} loss_sd={train_loss_sd:.4f} "
+                    f"loss_kd_output={train_loss_kd_output:.4f} "
+                    f"loss_kd_feat={train_loss_kd_feat:.4f} lr={current_lr:.6f}"
+                )
+
+                # log to CSV
                 with open(csv_log_path, 'a') as logfile:
                     logwriter = csv.writer(logfile, delimiter=',')
-                    logwriter.writerow([epoch, step, global_step,
-                                        train_loss, train_loss_sd, train_loss_kd_output, train_loss_kd_feat,
-                                        lr_scheduler.get_last_lr()[0],
-                                        args.lambda_sd, args.lambda_kd_output, args.lambda_kd_feat])
+                    logwriter.writerow([
+                        epoch, step, global_step,
+                        train_loss, train_loss_sd, train_loss_kd_output, train_loss_kd_feat,
+                        current_lr,
+                        args.lambda_sd, args.lambda_kd_output, args.lambda_kd_feat
+                    ])
 
+                # log to wandb if available
+                if has_wandb:
+                    wandb.log({
+                        "train_loss": train_loss,
+                        "train_loss_sd": train_loss_sd,
+                        "train_loss_kd_output": train_loss_kd_output,
+                        "train_loss_kd_feat": train_loss_kd_feat,
+                        "lr": current_lr,
+                    }, step=global_step)
+
+                # reset accumulators
                 train_loss = 0.0
                 train_loss_sd = 0.0
                 train_loss_kd_output = 0.0
                 train_loss_kd_feat = 0.0
 
-                # Save checkpoint
+                # save checkpoint
                 if global_step % args.checkpointing_steps == 0:
                     save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                     os.makedirs(save_path, exist_ok=True)
@@ -482,37 +556,62 @@ def main():
                     }, os.path.join(save_path, "checkpoint.pt"))
                     logger.info(f"Saved checkpoint to {save_path}")
 
+                    # respect checkpoints_total_limit
+                    if args.checkpoints_total_limit is not None:
+                        all_ckpts = sorted(
+                            [d for d in os.listdir(args.output_dir) if d.startswith("checkpoint")],
+                            key=lambda x: int(x.split("-")[1])
+                        )
+                        while len(all_ckpts) > args.checkpoints_total_limit:
+                            oldest = os.path.join(args.output_dir, all_ckpts.pop(0))
+                            import shutil
+                            shutil.rmtree(oldest)
+                            logger.info(f"Deleted old checkpoint: {oldest}")
+
             progress_bar.set_postfix({
                 "step_loss": loss.detach().item(),
                 "sd_loss": loss_sd.detach().item(),
-                "kd_output_loss": loss_kd_output.detach().item(),
-                "kd_feat_loss": loss_kd_feat.detach().item(),
-                "lr": lr_scheduler.get_last_lr()[0]
+                "kd_out": loss_kd_output.detach().item(),
+                "kd_feat": loss_kd_feat.detach().item(),
+                "lr": lr_scheduler.get_last_lr()[0],
             })
 
-            # Validation images
+            # ------------------------------------------------- validation
             if (args.valid_prompt is not None) and (step % args.valid_steps == 0):
-                logger.info(f"Running validation... Generating {args.num_valid_images} images with prompt: {args.valid_prompt}.")
+                logger.info(
+                    f"Running validation... Generating {args.num_valid_images} images "
+                    f"with prompt: '{args.valid_prompt}'")
                 unet.eval()
+
                 pipeline = StableDiffusionPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
                     safety_checker=None,
                     revision=args.revision,
                 ).to(device)
                 pipeline.set_progress_bar_config(disable=True)
-                generator = torch.Generator(device=device).manual_seed(args.seed)
 
+                generator = torch.Generator(device=device)
+                if args.seed is not None:
+                    generator = generator.manual_seed(args.seed)
+
+                # save teacher images once
                 if not os.path.exists(os.path.join(val_img_dir, "teacher_0.png")):
                     for kk in range(args.num_valid_images):
-                        image = pipeline(args.valid_prompt, num_inference_steps=25, generator=generator).images[0]
+                        image = pipeline(
+                            args.valid_prompt, num_inference_steps=25, generator=generator
+                        ).images[0]
                         image.save(os.path.join(val_img_dir, f"teacher_{kk}.png"))
 
+                # save student images
                 pipeline.unet = unet
                 for kk in range(args.num_valid_images):
-                    image = pipeline(args.valid_prompt, num_inference_steps=25, generator=generator).images[0]
-                    tmp_name = os.path.join(val_img_dir, f"gstep{global_step}_epoch{epoch}_step{step}_{kk}.png")
+                    image = pipeline(
+                        args.valid_prompt, num_inference_steps=25, generator=generator
+                    ).images[0]
+                    tmp_name = os.path.join(
+                        val_img_dir, f"gstep{global_step}_epoch{epoch}_step{step}_{kk}.png")
                     image.save(tmp_name)
-                    print(tmp_name)
+                    logger.info(f"Saved validation image: {tmp_name}")
 
                 del pipeline
                 torch.cuda.empty_cache()
@@ -521,7 +620,7 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-    # Save final model
+    # ------------------------------------------------------- save final model
     if args.use_ema:
         ema_unet.copy_to(unet.parameters())
 
@@ -533,7 +632,8 @@ def main():
         revision=args.revision,
     )
     pipeline.save_pretrained(args.output_dir)
-    logger.info("Training complete.")
+    logger.info(f"Model saved to {args.output_dir}")
+
 
 if __name__ == "__main__":
     main()
