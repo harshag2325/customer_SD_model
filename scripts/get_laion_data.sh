@@ -8,14 +8,14 @@
 # preprocessed_212k: 212,776 image-text pairs (18GB tar.gz; 20GB data folder)
 # preprocessed_2256k: 2,256,472 image-text pairs (182GB tar.gz; 204GB data folder)
 
-DATA_TYPE=$1  # {preprocessed_11k, preprocessed_212k, preprocessed_2256k}
+DATA_TYPE=$1  # {preprocessed_11k, preprocessed_212k, preprocessed_2256k, preprocessed_63K}
 FILE_NAME="${DATA_TYPE}.tar.gz"
 
 DATA_DIR="./data/laion_aes/"
 FILE_UNZIP_DIR="${DATA_DIR}${DATA_TYPE}"
 FILE_PATH="${DATA_DIR}${FILE_NAME}"
 
-if [ "$DATA_TYPE" = "preprocessed_11k" ] || [ "$DATA_TYPE" = "preprocessed_212k" ]; then
+if [ "$DATA_TYPE" = "preprocessed_11k" ] || [ "$DATA_TYPE" = "preprocessed_212k" ]|| [ "$DATA_TYPE" = "preprocessed_63K" ]; then
     S3_URL="https://netspresso-research-code-release.s3.us-east-2.amazonaws.com/data/improved_aesthetics_6.5plus/${FILE_NAME}"
 elif [ "$DATA_TYPE" = "preprocessed_2256k" ]; then
     S3_URL="https://netspresso-research-code-release.s3.us-east-2.amazonaws.com/data/improved_aesthetics_6.25plus/${FILE_NAME}"
