@@ -570,29 +570,29 @@ def main():
                 train_loss_kd_output = 0.0
                 train_loss_kd_feat = 0.0
 
-                # save checkpoint
-                if global_step % args.checkpointing_steps == 0:
-                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                    os.makedirs(save_path, exist_ok=True)
-                    torch.save({
-                        "unet": unet.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "global_step": global_step,
-                    }, os.path.join(save_path, "checkpoint.pt"))
-                    logger.info(f"Saved checkpoint to {save_path}")
+                # # save checkpoint
+                # if global_step % args.checkpointing_steps == 0:
+                #     save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                #     os.makedirs(save_path, exist_ok=True)
+                #     torch.save({
+                #         "unet": unet.state_dict(),
+                #         "optimizer": optimizer.state_dict(),
+                #         "lr_scheduler": lr_scheduler.state_dict(),
+                #         "global_step": global_step,
+                #     }, os.path.join(save_path, "checkpoint.pt"))
+                #     logger.info(f"Saved checkpoint to {save_path}")
 
-                    # prune old checkpoints if limit set
-                    if args.checkpoints_total_limit is not None:
-                        all_ckpts = sorted(
-                            [d for d in os.listdir(args.output_dir)
-                             if d.startswith("checkpoint")],
-                            key=lambda x: int(x.split("-")[1])
-                        )
-                        while len(all_ckpts) > args.checkpoints_total_limit:
-                            oldest = os.path.join(args.output_dir, all_ckpts.pop(0))
-                            shutil.rmtree(oldest)
-                            logger.info(f"Deleted old checkpoint: {oldest}")
+                #     # prune old checkpoints if limit set
+                #     if args.checkpoints_total_limit is not None:
+                #         all_ckpts = sorted(
+                #             [d for d in os.listdir(args.output_dir)
+                #              if d.startswith("checkpoint")],
+                #             key=lambda x: int(x.split("-")[1])
+                #         )
+                #         while len(all_ckpts) > args.checkpoints_total_limit:
+                #             oldest = os.path.join(args.output_dir, all_ckpts.pop(0))
+                #             shutil.rmtree(oldest)
+                #             logger.info(f"Deleted old checkpoint: {oldest}")
 
             progress_bar.set_postfix({
                 "step_loss": loss.detach().item(),
