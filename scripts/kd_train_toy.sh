@@ -3,7 +3,7 @@
 # Code modified from https://github.com/huggingface/diffusers/tree/v0.15.0/examples/text_to_image
 # ------------------------------------------------------------------------------------
 MODEL_NAME="CompVis/stable-diffusion-v1-4"
-TRAIN_DATA_DIR="./data/laion_aes/preprocessed_212k"
+TRAIN_DATA_DIR="./data/laion_aes/preprocessed_11k"
 UNET_CONFIG_PATH="./src/unet_config"
 UNET_NAME="bk_small" # option: ["bk_base", "bk_small", "bk_tiny"]
 OUTPUT_DIR="./results/toy_"$UNET_NAME
@@ -25,7 +25,7 @@ CUDA_VISIBLE_DEVICES=0 python src/kd_train_text_to_image.py \
   --max_grad_norm 1 \
   --lr_scheduler="constant" --lr_warmup_steps=0 \
   --report_to="all" \
-  --max_train_steps=100 \
+  --max_train_steps=200 \
   --seed 1234 \
   --gradient_accumulation_steps $GRAD_ACCUMULATION \
   --checkpointing_steps 5 \
