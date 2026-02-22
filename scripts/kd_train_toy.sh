@@ -3,7 +3,7 @@
 # Code modified from https://github.com/huggingface/diffusers/tree/v0.15.0/examples/text_to_image
 # ------------------------------------------------------------------------------------
 MODEL_NAME="CompVis/stable-diffusion-v1-4"
-TRAIN_DATA_DIR="./data/laion_aes/preprocessed_11k"
+TRAIN_DATA_DIR="./data/laion_aes/preprocessed_212k"
 UNET_CONFIG_PATH="./src/unet_config"
 UNET_NAME="bk_small" # option: ["bk_base", "bk_small", "bk_tiny"]
 OUTPUT_DIR="./results/toy_"$UNET_NAME
