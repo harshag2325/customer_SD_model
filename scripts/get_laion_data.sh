@@ -25,4 +25,4 @@ else
 fi
 
 wget $S3_URL -O $FILE_PATH
-tar -xvzf $FILE_PATH -C $DATA_DIR
+pv $FILE_PATH | tar -xzf - -C $DATA_DIR
