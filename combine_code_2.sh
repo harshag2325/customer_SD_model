@@ -1,0 +1,56 @@
+DATA_TYPE=$1  # {preprocessed_11k, preprocessed_212k, preprocessed_2256k}
+FILE_NAME="${DATA_TYPE}.tar.gz"
+
+DATA_DIR="./data/laion_aes/"
+FILE_UNZIP_DIR="${DATA_DIR}${DATA_TYPE}"
+FILE_PATH="${DATA_DIR}${FILE_NAME}"
+
+if [ "$DATA_TYPE" = "preprocessed_11k" ] || [ "$DATA_TYPE" = "preprocessed_212k" ]; then
+    S3_URL="https://netspresso-research-code-release.s3.us-east-2.amazonaws.com/data/improved_aesthetics_6.5plus/${FILE_NAME}"
+elif [ "$DATA_TYPE" = "preprocessed_2256k" ]; then
+    S3_URL="https://netspresso-research-code-release.s3.us-east-2.amazonaws.com/data/improved_aesthetics_6.25plus/${FILE_NAME}"
+else
+    echo "Something wrong in data folder name"
+    exit
+fi
+
+wget $S3_URL -O $FILE_PATH
+pv $FILE_PATH | tar -xzf - -C $DATA_DIR
+
+
+MODEL_NAME="CompVis/stable-diffusion-v1-4"
+TRAIN_DATA_DIR="./data/laion_aes/${DATA_TYPE}"
+UNET_CONFIG_PATH="./src/unet_config"
+UNET_NAME="bk_small" # option: ["bk_base", "bk_small", "bk_tiny"]
+OUTPUT_DIR="./results/toy_"$UNET_NAME
+
+BATCH_SIZE=$2
+MAX_TRAIN_STEP=$3
+GRAD_ACCUMULATION=4
+
+StartTime=$(date +%s)
+
+CUDA_VISIBLE_DEVICES=0 python src/kd_train_text_to_image.py \
+  --pretrained_model_name_or_path $MODEL_NAME \
+  --train_data_dir $TRAIN_DATA_DIR \
+  --use_ema \
+  --resolution 512 --center_crop --random_flip \
+  --train_batch_size $BATCH_SIZE \
+  --gradient_checkpointing \
+  --mixed_precision="fp16" \
+  --learning_rate 5e-05 \
+  --max_grad_norm 1 \
+  --lr_scheduler="constant" --lr_warmup_steps=0 \
+  --report_to="all" \
+  --max_train_steps $MAX_TRAIN_STEP \
+  --seed 1234 \
+  --gradient_accumulation_steps $GRAD_ACCUMULATION \
+  --checkpointing_steps 5 \
+  --valid_steps 5 \
+  --lambda_sd 1.0 --lambda_kd_output 1.0 --lambda_kd_feat 1.0 \
+  --use_copy_weight_from_teacher \
+  --unet_config_path $UNET_CONFIG_PATH --unet_config_name $UNET_NAME \
+  --output_dir $OUTPUT_DIR
+
+EndTime=$(date +%s)
+echo "** KD training takes $(($EndTime - $StartTime)) seconds."
